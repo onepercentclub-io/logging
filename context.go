@@ -1,19 +1,13 @@
 package logging
 
-import (
-	"context"
-
-	"github.com/TheZeroSlave/zapsentry"
-	"github.com/getsentry/sentry-go"
-	"go.uber.org/zap/zapcore"
-)
+import "context"
 
 // contextKey is an unexported type for context keys defined in this package.
 type contextKey string
 
 const (
 	// ctxKeyUserID stores the authenticated user's ID in context.
-	// Set by: Auth middleware (after JWT verification)
+	// Set by: auth middleware (after JWT verification)
 	// Used by: GetLogger() to auto-inject user_id
 	ctxKeyUserID contextKey = "logging_user_id"
 
@@ -22,12 +16,6 @@ const (
 	// Used by: GetLogger() to auto-inject request_id
 	ctxKeyRequestID contextKey = "logging_request_id"
 )
-
-// SentryTransactionKey is the context key used to store the Sentry transaction span.
-//
-// During service migration, middleware must write the Sentry span using this key
-// so that GetLogger() can extract trace_id and span_id.
-const SentryTransactionKey contextKey = "sentry_transaction"
 
 // WithUserID returns a new context with the user ID set.
 // Call this in auth middleware after verifying the JWT.
@@ -51,14 +39,4 @@ func UserIDFromContext(ctx context.Context) (string, bool) {
 func RequestIDFromContext(ctx context.Context) (string, bool) {
 	reqID, ok := ctx.Value(ctxKeyRequestID).(string)
 	return reqID, ok && reqID != ""
-}
-
-// getLogScopeFromContext returns the Sentry scope as a Zap field.
-// Used internally by GetLogger().
-func getLogScopeFromContext(ctx context.Context) zapcore.Field {
-	hub := sentry.GetHubFromContext(ctx)
-	if hub != nil {
-		return zapsentry.NewScopeFromScope(hub.Scope().Clone())
-	}
-	return zapsentry.NewScope()
 }

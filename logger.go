@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/TheZeroSlave/zapsentry"
-	"github.com/getsentry/sentry-go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -32,16 +32,21 @@ type Config struct {
 	Service string
 
 	// Environment is the deployment environment.
+	// "local" switches to a dev-friendly console encoder; everything else uses
+	// production JSON encoding to stdout.
 	Environment string
 
-	// SentryDSN is the Sentry DSN for error tracking integration.
-	// If empty, Sentry integration is skipped.
-	SentryDSN string
-
 	// Sampling controls log sampling to reduce CloudWatch volume.
-	// If zero-valued (Sampling{}), DefaultSampling() is used in non-local environments
-	// and no sampling is applied in local (so developers see every log).
+	// If zero-valued (Sampling{}), DefaultSampling() is used in non-local
+	// environments and no sampling is applied in local (devs see every log).
 	Sampling Sampling
+
+	// ExtraCores are additional zapcore.Core sinks teed to every log entry.
+	// Use this to inject error-reporting cores (e.g. zapsentry), shipping
+	// cores, or audit sinks — without coupling this package to a specific
+	// vendor. Nil or empty means "stdout only", which is the right default
+	// for services that don't ship logs anywhere else.
+	ExtraCores []zapcore.Core
 }
 
 var (
@@ -59,8 +64,8 @@ func integerLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendInt8((int8(l) + 3) * 10)
 }
 
-// Init initializes the global base logger. Must be called once at application startup,
-// before any GetLogger() calls. Panics if called with empty Service name.
+// Init initializes the global base logger. Must be called once at application
+// startup, before any GetLogger() calls. Panics if called with empty Service.
 // Subsequent calls are no-ops (safe to call multiple times).
 func Init(cfg Config) {
 	initOnce.Do(func() {
@@ -85,10 +90,6 @@ func Init(cfg Config) {
 			zapCfg.DisableCaller = true
 			zapCfg.DisableStacktrace = true
 
-			// Apply sampling for cost reduction. Zap's sampler thins repeated
-			// log entries of the same (level, message) tuple in each 1-second
-			// window: it keeps the first `Initial` entries, then 1 in every
-			// `Thereafter`. Errors are always kept (see sampling.go).
 			samp := cfg.Sampling
 			if samp == (Sampling{}) {
 				samp = DefaultSampling()
@@ -101,7 +102,6 @@ func Init(cfg Config) {
 			zapCfg.InitialFields = map[string]interface{}{
 				fields.Service: cfg.Service,
 			}
-			// No sampling locally — devs need every log.
 			zapCfg.Sampling = nil
 		}
 
@@ -110,31 +110,18 @@ func Init(cfg Config) {
 			panic("logging: failed to build zap logger: " + err.Error())
 		}
 
-		// Attach Sentry core for error-level logs (non-local only).
-		// The package initializes its own Sentry client from the DSN so it does not
-		// depend on the service having called sentry.Init() beforehand.
-		if !isLocal && cfg.SentryDSN != "" {
-			sentryClient, sentryErr := sentry.NewClient(sentry.ClientOptions{
-				Dsn:              cfg.SentryDSN,
-				ServerName:       cfg.Service,
-				Environment:      cfg.Environment,
-				EnableTracing:    true,
-				AttachStacktrace: true,
-				TracesSampleRate: 1.0,
-				MaxErrorDepth:    5,
-				MaxBreadcrumbs:   -1,
-				MaxSpans:         5,
-			})
-			if sentryErr == nil && sentryClient != nil {
-				sentryCore, coreErr := zapsentry.NewCore(zapsentry.Configuration{
-					Level:             zapcore.ErrorLevel,
-					EnableBreadcrumbs: false,
-					BreadcrumbLevel:   zapcore.InfoLevel,
-				}, zapsentry.NewSentryClientFromClient(sentryClient))
-				if coreErr == nil {
-					zapLogger = zapsentry.AttachCoreToLogger(sentryCore, zapLogger)
-				}
-			}
+		// Tee into any caller-supplied cores. This is how services wire
+		// Sentry, Datadog, or any other sink without this package importing
+		// their SDKs. Callers build their core (e.g. zapsentry.NewCore) and
+		// hand it in; we fan out every entry to it via zapcore.Tee.
+		if len(cfg.ExtraCores) > 0 {
+			extras := cfg.ExtraCores
+			zapLogger = zapLogger.WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
+				all := make([]zapcore.Core, 0, 1+len(extras))
+				all = append(all, c)
+				all = append(all, extras...)
+				return zapcore.NewTee(all...)
+			}))
 		}
 
 		baseLogger = zapLogger.Sugar()
@@ -144,10 +131,14 @@ func Init(cfg Config) {
 // GetLogger returns a new Logger pre-populated with context fields.
 //
 // Auto-injected fields (if present in context):
-//   - trace_id  (from Sentry span)
-//   - span_id   (from Sentry span)
-//   - user_id   (set by auth middleware)
-//   - request_id (set by APM middleware)
+//   - trace_id  (from the active OpenTelemetry span, if any)
+//   - span_id   (from the active OpenTelemetry span, if any)
+//   - user_id   (set by auth middleware via WithUserID)
+//   - request_id (set by APM middleware via WithRequestID)
+//
+// Trace correlation works with any OTel-compatible tracer (OTel-native,
+// Sentry's OTel bridge, Datadog, etc.) — this package depends only on the
+// vendor-neutral go.opentelemetry.io/otel/trace API.
 //
 // This function NEVER mutates the global base logger.
 func GetLogger(ctx context.Context) *Logger {
@@ -161,28 +152,23 @@ func GetLogger(ctx context.Context) *Logger {
 		return &Logger{sugar: sugar}
 	}
 
-	// Auto-inject trace_id and span_id from Sentry span
-	if spanRef := ctx.Value(SentryTransactionKey); spanRef != nil {
-		if span, ok := spanRef.(*sentry.Span); ok {
-			sugar = sugar.With(
-				fields.TraceID, span.TraceID.String(),
-				fields.SpanID, span.SpanID.String(),
-			)
-		}
+	// Auto-inject trace_id and span_id from the active OTel span.
+	// SpanFromContext always returns a non-nil span (no-op span if absent);
+	// IsValid() distinguishes a real recorded span from the no-op.
+	if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
+		sugar = sugar.With(
+			fields.TraceID, sc.TraceID().String(),
+			fields.SpanID, sc.SpanID().String(),
+		)
 	}
 
-	// Auto-inject user_id (set by auth middleware)
 	if userID, ok := ctx.Value(ctxKeyUserID).(string); ok && userID != "" {
 		sugar = sugar.With(fields.UserID, userID)
 	}
 
-	// Auto-inject request_id (set by APM middleware)
 	if reqID, ok := ctx.Value(ctxKeyRequestID).(string); ok && reqID != "" {
 		sugar = sugar.With(fields.RequestID, reqID)
 	}
-
-	// Attach Sentry scope for error routing
-	sugar = sugar.With(getLogScopeFromContext(ctx))
 
 	return &Logger{sugar: sugar, ctx: ctx}
 }
@@ -212,19 +198,21 @@ func (l *Logger) Warnw(msg string, keysAndValues ...interface{}) {
 }
 
 // Errorw logs an error-level message with structured key/value pairs.
-// In non-local environments this is also forwarded to Sentry.
+// In services that wire an error-reporting core via Config.ExtraCores,
+// this entry is also forwarded to that sink.
 func (l *Logger) Errorw(msg string, keysAndValues ...interface{}) {
 	l.sugar.Errorw(msg, keysAndValues...)
 }
 
-// Alertw logs at Error level AND sets the Sentry "alert" tag on the current span.
-// Use this for critical business failures that require immediate on-call attention.
+// Alertw logs at Error level AND tags the active OTel span with alert=true,
+// so on-call tooling can route critical business failures specifically.
+// If no tracer is wired (no active span in ctx), the tag write is a safe
+// no-op — the Errorw still fires.
 func (l *Logger) Alertw(msg string, keysAndValues ...interface{}) {
 	if l.ctx != nil {
-		if spanRef := l.ctx.Value(SentryTransactionKey); spanRef != nil {
-			if span, ok := spanRef.(*sentry.Span); ok {
-				span.SetTag("alert", "true")
-			}
+		span := trace.SpanFromContext(l.ctx)
+		if span.SpanContext().IsValid() {
+			span.SetAttributes(attribute.String("alert", "true"))
 		}
 	}
 	l.sugar.Errorw(msg, keysAndValues...)

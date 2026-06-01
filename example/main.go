@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/onepercentclub-io/logging"
 	logerrors "github.com/onepercentclub-io/logging/errors"
 	"github.com/onepercentclub-io/logging/events"
@@ -29,12 +31,13 @@ func main() {
 	}
 
 	// ── 1. Initialize once at startup ──────────────────────────────────────
+	//
+	// Note: this package no longer creates a Sentry client itself. If the
+	// service wants Sentry (or Datadog, or anything else), it builds the
+	// zapcore.Core for it and passes it via Config.ExtraCores. See README.
 	logging.Init(logging.Config{
 		Service:     "investments-backend",
 		Environment: env,
-		// SentryDSN intentionally empty — we don't want to actually ship
-		// events to Sentry from the example. In a real service you'd pass
-		// os.Getenv("SENTRY_DSN") here.
 	})
 
 	startup := logging.Get()
@@ -50,7 +53,7 @@ func main() {
 	section("Simulating an external API call that fails")
 	simulateAPIFailure()
 
-	section("Simulating a DB query that succeeds")
+	section("Simulating a DB query that succeeds + fails")
 	simulateDBQuery()
 
 	section("Simulating a cache hit + miss")
@@ -68,6 +71,9 @@ func main() {
 	section("Context isolation between two requests")
 	simulateContextIsolation()
 
+	section("Trace correlation via OpenTelemetry span")
+	simulateOTelTrace()
+
 	section("Extracting values back from context")
 	demoExtraction()
 
@@ -75,24 +81,19 @@ func main() {
 }
 
 // ── Scenario 1: HTTP request ────────────────────────────────────────────────
-// In real code this is what the REST middleware would emit.
 func simulateHTTPRequest() {
 	ctx := newRequestContext("usr_789", "req_abc-123")
 	log := logging.GetLogger(ctx)
 
 	start := time.Now()
-	// ... handler does work ...
-	time.Sleep(15 * time.Millisecond)
+	time.Sleep(15 * time.Millisecond) // pretend handler did work
 
 	log.Infow(events.HTTPRequestCompleted,
-		logging.MergeFields(
-			logging.HTTPFields("POST", "/api/v1/payments", 200, time.Since(start).Milliseconds()),
-		)...,
+		logging.HTTPFields("POST", "/api/v1/payments", 200, time.Since(start).Milliseconds())...,
 	)
 }
 
 // ── Scenario 2: failed external API call ────────────────────────────────────
-// Exercises APICallFields + ErrorFields + MergeFields composition.
 func simulateAPIFailure() {
 	ctx := newRequestContext("usr_789", "req_abc-123")
 	log := logging.GetLogger(ctx)
@@ -115,8 +116,6 @@ func simulateDBQuery() {
 	log.Infow(events.DBQueryCompleted,
 		logging.DBFields("payments", "find_one", 45)...,
 	)
-
-	// A failure too, so we see error fields composed with DB fields
 	log.Errorw(events.DBQueryFailed,
 		logging.MergeFields(
 			logging.DBFields("payments", "insert", 120),
@@ -141,7 +140,6 @@ func simulateRetry() {
 
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Pretend the call still fails — log a retry attempt
 		log.Warnw(events.TaskRetrying,
 			logging.MergeFields(
 				logging.RetryFields(attempt, maxAttempts, int64(attempt*100)),
@@ -150,14 +148,12 @@ func simulateRetry() {
 		)
 	}
 
-	// And finally the give-up log
 	log.Errorw("retry_exhausted",
 		logging.ErrorFields(logerrors.MaxRetriesExceeded, errors.New("3 attempts failed"), false)...,
 	)
 }
 
 // ── Scenario 6: async task lifecycle ────────────────────────────────────────
-// Mirrors what the asynq middleware would emit.
 func simulateTask() {
 	ctx := newRequestContext("usr_789", "req_abc-123")
 	log := logging.GetLogger(ctx)
@@ -172,7 +168,7 @@ func simulateTask() {
 		)...,
 	)
 
-	time.Sleep(20 * time.Millisecond) // pretend to do work
+	time.Sleep(20 * time.Millisecond)
 
 	log.Infow(events.TaskCompleted,
 		logging.MergeFields(
@@ -195,8 +191,6 @@ func simulateAlert() {
 }
 
 // ── Scenario 8: context isolation ───────────────────────────────────────────
-// The whole point of GetLogger(ctx) returning a fresh logger: two concurrent
-// requests cannot leak fields into each other.
 func simulateContextIsolation() {
 	logA := logging.GetLogger(newRequestContext("usr_AAA", "req_AAA"))
 	logB := logging.GetLogger(newRequestContext("usr_BBB", "req_BBB"))
@@ -205,7 +199,32 @@ func simulateContextIsolation() {
 	logB.Infow("isolation_check_b", "note", "should show usr_BBB only")
 }
 
-// ── Scenario 9: pull values back out ────────────────────────────────────────
+// ── Scenario 9: OTel trace correlation ──────────────────────────────────────
+//
+// This proves trace_id / span_id flow into log lines automatically whenever an
+// OTel span is on the context — regardless of which tracer SDK produced it.
+// We build a SpanContext manually here using the OTel API package so the
+// example stays SDK-free; in a real service the SDK (or the Sentry OTel
+// bridge) produces this same SpanContext for every request.
+func simulateOTelTrace() {
+	traceID, _ := trace.TraceIDFromHex("0af7651916cd43dd8448eb211c80319c")
+	spanID, _ := trace.SpanIDFromHex("b7ad6b7169203331")
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     false,
+	})
+
+	ctx := newRequestContext("usr_789", "req_abc-123")
+	ctx = trace.ContextWithSpanContext(ctx, sc)
+
+	log := logging.GetLogger(ctx)
+	log.Infow("traced_event", "note", "trace_id and span_id should appear below")
+}
+
+// ── Scenario 10: pull values back out ───────────────────────────────────────
 func demoExtraction() {
 	ctx := newRequestContext("usr_789", "req_abc-123")
 
@@ -219,8 +238,6 @@ func demoExtraction() {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-// newRequestContext is what middleware would do: stash user_id + request_id
-// onto the context so every downstream log picks them up automatically.
 func newRequestContext(userID, requestID string) context.Context {
 	ctx := context.Background()
 	ctx = logging.WithUserID(ctx, userID)

@@ -22,11 +22,13 @@ import (
 )
 
 func main() {
-    // Initialize once at startup
+    // Initialize once at startup. The package itself is vendor-neutral —
+    // it only depends on Zap and the OpenTelemetry trace API. To ship errors
+    // to Sentry, Datadog, etc., build that core in your service and inject
+    // it via Config.ExtraCores (see "Wiring an error sink" below).
     logging.Init(logging.Config{
         Service:     "investments-backend",
         Environment: "prod",
-        SentryDSN:   "https://examplePublicKey@o0.ingest.sentry.io/0",
     })
 
     // Startup logging (no request context)
@@ -38,7 +40,9 @@ func main() {
     ctx = logging.WithRequestID(ctx, "req_abc-123")
 
     log := logging.GetLogger(ctx)
-    // user_id, request_id, trace_id are auto-injected — no need to pass them manually
+    // user_id, request_id, trace_id, span_id are auto-injected — no need to
+    // pass them manually. trace_id / span_id come from the active OTel span,
+    // user_id / request_id come from middleware setters.
     log.Infow(events.HTTPRequestCompleted,
         logging.HTTPFields("POST", "/api/v1/payments", 200, 234)...,
     )
@@ -47,7 +51,7 @@ func main() {
 
 **Production output** (JSON, one line per log):
 ```json
-{"level":20,"time":"2026-03-12T12:30:50.000Z","msg":"http_request_completed","service":"investments-backend","environment":"prod","trace_id":"abc123","user_id":"usr_789","request_id":"req_abc-123","http.method":"POST","http.path":"/api/v1/payments","http.status_code":200,"duration_ms":234}
+{"level":30,"time":"2026-03-12T12:30:50.000Z","msg":"http_request_completed","service":"investments-backend","environment":"prod","trace_id":"0af7651916cd43dd8448eb211c80319c","span_id":"b7ad6b7169203331","user_id":"usr_789","request_id":"req_abc-123","http.method":"POST","http.path":"/api/v1/payments","http.status_code":200,"duration_ms":234}
 ```
 
 Every field is queryable in CloudWatch:
@@ -74,10 +78,57 @@ github.com/onepercentclub-io/logging
 logging.Init(logging.Config{
     Service:     "my-service",      // required
     Environment: "prod",            // "local" uses dev-friendly console output
-    SentryDSN:   "https://...",     // optional, enables Sentry integration
     Sampling:    logging.Sampling{Initial: 100, Thereafter: 100}, // optional; defaults applied in non-local
+    ExtraCores:  []zapcore.Core{sentryCore}, // optional; see "Wiring an error sink"
 })
 ```
+
+### Trace correlation
+
+`trace_id` and `span_id` are extracted from the active OpenTelemetry span on
+the context — via `go.opentelemetry.io/otel/trace.SpanFromContext(ctx)`. This
+works with any OTel-compatible tracer:
+
+- OTel-native (OpenTelemetry SDK + an exporter)
+- Sentry's OTel bridge
+- Datadog's OTel integration
+- Any other backend that participates in OTel context propagation
+
+No setup is required inside this package — as long as your service starts
+spans on incoming requests, `GetLogger(ctx)` finds them automatically. If no
+tracer is wired, the fields are simply omitted from log lines (the no-op span
+returns an invalid `SpanContext`).
+
+### Wiring an error sink (Sentry, Datadog, ...)
+
+This package no longer creates a Sentry client itself. Build whatever
+`zapcore.Core` you need in your service and pass it in via `Config.ExtraCores`.
+Every log entry is teed to stdout *and* to each extra core.
+
+```go
+import (
+    "github.com/TheZeroSlave/zapsentry"
+    "github.com/getsentry/sentry-go"
+    "go.uber.org/zap/zapcore"
+
+    "github.com/onepercentclub-io/logging"
+)
+
+// In your service's startup (you already have one Sentry client — reuse it):
+sentryCore, _ := zapsentry.NewCore(zapsentry.Configuration{
+    Level: zapcore.ErrorLevel,
+}, zapsentry.NewSentryClientFromClient(sentry.CurrentHub().Client()))
+
+logging.Init(logging.Config{
+    Service:     "investments-backend",
+    Environment: env,
+    ExtraCores:  []zapcore.Core{sentryCore},
+})
+```
+
+This keeps the logging package vendor-neutral and avoids the double-Sentry-
+client problem services would otherwise hit (one from `sentry.Init` in APM
+middleware, a second from the logging package).
 
 ### Sampling
 
@@ -125,7 +176,10 @@ log.Alertw("sip_execution_failed",
 )
 ```
 
-`Alertw` logs at Error level and sets the Sentry `alert` tag on the current span for alert routing.
+`Alertw` logs at Error level and sets the `alert=true` attribute on the active
+OpenTelemetry span, so on-call tooling can route critical failures
+specifically. If no tracer is wired, the attribute write is a safe no-op and
+the Errorw still fires.
 
 ### Context Injection
 
@@ -137,9 +191,8 @@ ctx = logging.WithUserID(ctx, payload.ID)
 
 // In APM middleware
 ctx = logging.WithRequestID(ctx, uuid.New().String())
-
-// Store Sentry span for trace_id extraction
-ctx = context.WithValue(ctx, logging.SentryTransactionKey, span)
+// trace_id and span_id are picked up automatically from the OTel span
+// that your tracing middleware already starts on `ctx` — nothing extra to do.
 ```
 
 Extract values back when needed:
@@ -310,4 +363,36 @@ log.Infow(investlog.PaymentCreated,
 ```bash
 # Run example
 go run ./example/
+
+# Production JSON output (one line per log, what CloudWatch ingests)
+ENV=prod go run ./example/
 ```
+
+## Migrating from the Sentry-coupled version
+
+Earlier revisions of this package depended on `sentry-go` and `zapsentry`
+directly and created their own Sentry client inside `Init`. That caused two
+problems in production: services ended up with **two** Sentry clients with
+different configs (one from the service's APM middleware, one from this
+package), and `trace_id` extraction was hardcoded to `*sentry.Span`, which
+breaks the moment a service migrates to OpenTelemetry.
+
+The current version is **vendor-neutral**. If you are upgrading from the
+Sentry-coupled version, three things change for callers:
+
+1. **`Config.SentryDSN` is gone.** Drop it from your `logging.Init(...)`
+   call. The compile error you'll see is intentional — it makes sure you
+   don't silently lose Sentry integration.
+
+2. **Wire `zapsentry` yourself.** Build the core in your service (using the
+   Sentry client your APM middleware already created) and pass it via
+   `Config.ExtraCores`. See [Wiring an error sink](#wiring-an-error-sink-sentry-datadog-) above for the snippet.
+
+3. **`SentryTransactionKey` is gone.** Stop writing `*sentry.Span` to context
+   under that key. `GetLogger(ctx)` now reads `trace_id` / `span_id` from the
+   active OpenTelemetry span via `trace.SpanFromContext(ctx)`. Any
+   OTel-compatible tracer (including Sentry's OTel bridge) feeds this
+   automatically — there's nothing to set up in this package.
+
+The structured logging API itself — `GetLogger(ctx)`, `Infow`/`Errorw`/
+`Alertw`, all field/event/error constants, every helper — is unchanged.
