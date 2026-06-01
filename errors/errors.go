@@ -11,19 +11,21 @@ const (
 	RateLimit         = "RATE_LIMIT"
 	BadGateway        = "BAD_GATEWAY"
 	ConnectionRefused = "CONNECTION_REFUSED"
+	SSLError          = "SSL_ERROR"
 )
 
 // ──────────────────────────────────────────────
 // Database Errors
-// Used when a MongoDB/Redis operation fails
+// Used when a MongoDB/Redis/SQL operation fails
 // ──────────────────────────────────────────────
 
 const (
-	DBConnection = "DB_CONNECTION_ERROR"
-	DBQuery      = "DB_QUERY_ERROR"
-	DBTimeout    = "DB_TIMEOUT"
-	DBNotFound   = "DB_NOT_FOUND"
-	DBDuplicate  = "DB_DUPLICATE_KEY"
+	DBConnection  = "DB_CONNECTION_ERROR"
+	DBQuery       = "DB_QUERY_ERROR"
+	DBTimeout     = "DB_TIMEOUT"
+	DBNotFound    = "DB_NOT_FOUND"
+	DBDuplicate   = "DB_DUPLICATE_KEY"
+	DBTransaction = "DB_TRANSACTION_ERROR"
 )
 
 // ──────────────────────────────────────────────
@@ -32,9 +34,10 @@ const (
 // ──────────────────────────────────────────────
 
 const (
-	Validation   = "VALIDATION_ERROR"
-	InvalidInput = "INVALID_INPUT"
-	MissingField = "MISSING_FIELD"
+	Validation    = "VALIDATION_ERROR"
+	InvalidInput  = "INVALID_INPUT"
+	MissingField  = "MISSING_FIELD"
+	InvalidFormat = "INVALID_FORMAT"
 )
 
 // ──────────────────────────────────────────────
@@ -45,6 +48,7 @@ const (
 	Unauthorized = "UNAUTHORIZED"
 	Forbidden    = "FORBIDDEN"
 	TokenExpired = "TOKEN_EXPIRED"
+	InvalidToken = "INVALID_TOKEN"
 )
 
 // ──────────────────────────────────────────────
@@ -52,6 +56,17 @@ const (
 // ──────────────────────────────────────────────
 
 const (
-	Internal = "INTERNAL_ERROR"
-	Panic    = "PANIC"
+	Internal      = "INTERNAL_ERROR"
+	Panic         = "PANIC"
+	ConfigError   = "CONFIG_ERROR"
+	Serialization = "SERIALIZATION_ERROR"
+)
+
+// ──────────────────────────────────────────────
+// Retry / Circuit Breaker Errors
+// ──────────────────────────────────────────────
+
+const (
+	MaxRetriesExceeded = "MAX_RETRIES_EXCEEDED"
+	CircuitOpen        = "CIRCUIT_OPEN"
 )

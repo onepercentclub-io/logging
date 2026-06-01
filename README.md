@@ -75,8 +75,20 @@ logging.Init(logging.Config{
     Service:     "my-service",      // required
     Environment: "prod",            // "local" uses dev-friendly console output
     SentryDSN:   "https://...",     // optional, enables Sentry integration
+    Sampling:    logging.Sampling{Initial: 100, Thereafter: 100}, // optional; defaults applied in non-local
 })
 ```
+
+### Sampling
+
+In non-local environments, Zap's per-second sampler thins repeated entries of
+the same `(level, message)` tuple to cap CloudWatch volume on hot paths
+(health checks, tight loops). For each tuple per second, the first `Initial`
+entries are kept, then 1 in every `Thereafter` after that.
+
+- Default in non-local: `Sampling{Initial: 100, Thereafter: 100}`.
+- `local` always disables sampling so developers see every log.
+- Set `Sampling{Initial: 0}` to disable sampling explicitly in prod.
 
 ### Getting a Logger
 
@@ -157,6 +169,15 @@ logging.DBFields(collection, operation string, queryMs int64)
 // Asynq task fields
 logging.TaskFields(taskID, taskName, taskType string)
 
+// Queue saturation fields (asynq middleware at task pickup)
+logging.QueueFields(queueName string, pending, active int)
+
+// Cache operation fields
+logging.CacheFields(key string, hit bool, ttlSeconds int)
+
+// Retry attempt fields
+logging.RetryFields(attempt, maxCount int, delayMs int64)
+
 // Duration from start time
 logging.WithDuration(start time.Time)
 
@@ -182,12 +203,18 @@ All field names are constants — use them instead of raw strings to prevent typ
 | Category | Constants | Example |
 |----------|-----------|---------|
 | Core | `fields.Service`, `fields.Environment`, `fields.TraceID`, `fields.SpanID`, `fields.UserID`, `fields.RequestID` | Auto-injected |
-| HTTP | `fields.HTTPMethod`, `fields.HTTPPath`, `fields.HTTPStatusCode`, `fields.HTTPDomain`, `fields.HTTPClientIP` | `"http.method"` |
-| Error | `fields.ErrorType`, `fields.ErrorMessage`, `fields.ErrorIsRetryable` | `"error.type"` |
-| Timing | `fields.DurationMs` | `"duration_ms"` |
-| Database | `fields.DBCollection`, `fields.DBOperation`, `fields.DBQueryMs` | `"db.collection"` |
-| Task | `fields.TaskID`, `fields.TaskName`, `fields.TaskType`, `fields.QueuePendingCount`, `fields.QueueActiveCount`, `fields.QueueName` | `"task.id"` |
-| Provider | `fields.ProviderName`, `fields.ProviderRequestID` | `"provider.name"` |
+| HTTP | `fields.HTTPMethod`, `fields.HTTPPath`, `fields.HTTPStatusCode`, `fields.HTTPDomain`, `fields.HTTPClientIP`, `fields.HTTPUserAgent`, `fields.HTTPRequestID` | `"http.method"` |
+| Error | `fields.ErrorType`, `fields.ErrorMessage`, `fields.ErrorIsRetryable`, `fields.ErrorCode`, `fields.ErrorStackTrace` | `"error.type"` |
+| Timing | `fields.DurationMs`, `fields.DBQueryMsTotal`, `fields.ExternalAPIMs` | `"duration_ms"` |
+| Database | `fields.DBCollection` / `fields.DBTable`, `fields.DBOperation`, `fields.DBQueryMs`, `fields.DBRowsAffected` | `"db.collection"` |
+| Task | `fields.TaskID`, `fields.TaskName`, `fields.TaskType`, `fields.TaskStatus`, `fields.QueueName`, `fields.QueuePendingCount`, `fields.QueueActiveCount`, `fields.QueueDepth` | `"task.id"` |
+| Cache | `fields.CacheHit`, `fields.CacheKey`, `fields.CacheTTL` | `"cache.hit"` |
+| Retry | `fields.RetryAttempt`, `fields.RetryMaxCount`, `fields.RetryDelayMs` | `"retry.attempt"` |
+| Provider | `fields.ProviderName`, `fields.ProviderRequestID`, `fields.ProviderResponseID` | `"provider.name"` |
+
+> `db.collection` and `db.table` are aliases for the same concept — pick whichever
+> matches the store (Mongo "collection" vs SQL "table") and stay consistent inside
+> each service.
 
 ## Event Constants
 
@@ -195,18 +222,30 @@ Use as the first argument to `Infow`/`Errorw`:
 
 | Event | Value |
 |-------|-------|
+| `events.HTTPRequestStarted` | `"http_request_started"` |
 | `events.HTTPRequestCompleted` | `"http_request_completed"` |
 | `events.APICallStarted` | `"api_call_started"` |
 | `events.APICallCompleted` | `"api_call_completed"` |
 | `events.APICallFailed` | `"api_call_failed"` |
+| `events.DBQueryStarted` | `"db_query_started"` |
 | `events.DBQueryCompleted` | `"db_query_completed"` |
 | `events.DBQueryFailed` | `"db_query_failed"` |
 | `events.TaskStarted` | `"task_started"` |
 | `events.TaskCompleted` | `"task_completed"` |
 | `events.TaskFailed` | `"task_failed"` |
+| `events.TaskRetrying` | `"task_retrying"` |
 | `events.WebhookReceived` | `"webhook_received"` |
 | `events.WebhookProcessed` | `"webhook_processed"` |
 | `events.WebhookFailed` | `"webhook_failed"` |
+| `events.AuthLoginSuccess` | `"auth_login_success"` |
+| `events.AuthLoginFailed` | `"auth_login_failed"` |
+| `events.AuthTokenRefresh` | `"auth_token_refresh"` |
+| `events.AuthTokenExpired` | `"auth_token_expired"` |
+| `events.CacheHit` | `"cache_hit"` |
+| `events.CacheMiss` | `"cache_miss"` |
+| `events.CacheSet` | `"cache_set"` |
+| `events.HealthCheck` | `"health_check"` |
+| `events.ConfigLoaded` | `"config_loaded"` |
 | `events.AppStarted` | `"app_started"` |
 | `events.AppShutdown` | `"app_shutdown"` |
 
@@ -216,11 +255,12 @@ Use with `fields.ErrorType` for classifiable error alerting:
 
 | Category | Constants |
 |----------|-----------|
-| External | `errors.GatewayTimeout`, `errors.ServiceDown`, `errors.RateLimit`, `errors.BadGateway`, `errors.ConnectionRefused` |
-| Database | `errors.DBConnection`, `errors.DBQuery`, `errors.DBTimeout`, `errors.DBNotFound`, `errors.DBDuplicate` |
-| Validation | `errors.Validation`, `errors.InvalidInput`, `errors.MissingField` |
-| Auth | `errors.Unauthorized`, `errors.Forbidden`, `errors.TokenExpired` |
-| Internal | `errors.Internal`, `errors.Panic` |
+| External | `errors.GatewayTimeout`, `errors.ServiceDown`, `errors.RateLimit`, `errors.BadGateway`, `errors.ConnectionRefused`, `errors.SSLError` |
+| Database | `errors.DBConnection`, `errors.DBQuery`, `errors.DBTimeout`, `errors.DBNotFound`, `errors.DBDuplicate`, `errors.DBTransaction` |
+| Validation | `errors.Validation`, `errors.InvalidInput`, `errors.MissingField`, `errors.InvalidFormat` |
+| Auth | `errors.Unauthorized`, `errors.Forbidden`, `errors.TokenExpired`, `errors.InvalidToken` |
+| Internal | `errors.Internal`, `errors.Panic`, `errors.ConfigError`, `errors.Serialization` |
+| Retry / Circuit | `errors.MaxRetriesExceeded`, `errors.CircuitOpen` |
 
 ## Service-Specific Extensions
 
@@ -268,12 +308,6 @@ log.Infow(investlog.PaymentCreated,
 ## Local Development
 
 ```bash
-# Run tests
-go test ./... -v
-
-# Run tests with race detector
-go test ./... -v -race
-
 # Run example
 go run ./example/
 ```

@@ -27,6 +27,8 @@ func APICallFields(domain, method string, statusCode int, durationMs int64) []in
 }
 
 // ErrorFields returns structured fields for error logging.
+// error.message is omitted when err is nil so callers can pass a nil error
+// alongside a known error.type without polluting the log.
 func ErrorFields(errorType string, err error, isRetryable bool) []interface{} {
 	f := []interface{}{
 		fields.ErrorType, errorType,
@@ -39,6 +41,8 @@ func ErrorFields(errorType string, err error, isRetryable bool) []interface{} {
 }
 
 // DBFields returns structured fields for a database operation log.
+// `collection` maps to fields.DBCollection; use this name for both Mongo
+// collections and SQL tables — pick whichever vocabulary fits the service.
 func DBFields(collection, operation string, queryMs int64) []interface{} {
 	return []interface{}{
 		fields.DBCollection, collection,
@@ -53,6 +57,34 @@ func TaskFields(taskID, taskName, taskType string) []interface{} {
 		fields.TaskID, taskID,
 		fields.TaskName, taskName,
 		fields.TaskType, taskType,
+	}
+}
+
+// QueueFields returns structured fields for queue saturation logging,
+// typically emitted by the asynq middleware at task pickup.
+func QueueFields(queueName string, pending, active int) []interface{} {
+	return []interface{}{
+		fields.QueueName, queueName,
+		fields.QueuePendingCount, pending,
+		fields.QueueActiveCount, active,
+	}
+}
+
+// CacheFields returns structured fields for a cache operation log.
+func CacheFields(key string, hit bool, ttlSeconds int) []interface{} {
+	return []interface{}{
+		fields.CacheKey, key,
+		fields.CacheHit, hit,
+		fields.CacheTTL, ttlSeconds,
+	}
+}
+
+// RetryFields returns structured fields for a retry attempt log.
+func RetryFields(attempt, maxCount int, delayMs int64) []interface{} {
+	return []interface{}{
+		fields.RetryAttempt, attempt,
+		fields.RetryMaxCount, maxCount,
+		fields.RetryDelayMs, delayMs,
 	}
 }
 

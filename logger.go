@@ -14,10 +14,16 @@ import (
 
 // Logger wraps Zap's SugaredLogger. Each instance is request-scoped
 // and pre-populated with context fields (trace_id, user_id, etc).
+//
+// The underlying SugaredLogger is intentionally unexported — callers may only
+// use the structured *w methods (Infow/Errorw/...), never the format variants
+// (Infof/Errorf/...). This enforces the package's "every field is queryable"
+// invariant at the type level rather than via convention.
+//
 // Safe for concurrent use within a single request; do NOT share across requests.
 type Logger struct {
-	*zap.SugaredLogger
-	ctx context.Context
+	sugar *zap.SugaredLogger
+	ctx   context.Context
 }
 
 // Config holds initialization parameters.
@@ -31,12 +37,16 @@ type Config struct {
 	// SentryDSN is the Sentry DSN for error tracking integration.
 	// If empty, Sentry integration is skipped.
 	SentryDSN string
+
+	// Sampling controls log sampling to reduce CloudWatch volume.
+	// If zero-valued (Sampling{}), DefaultSampling() is used in non-local environments
+	// and no sampling is applied in local (so developers see every log).
+	Sampling Sampling
 }
 
 var (
-	baseLogger  *zap.SugaredLogger
-	serviceName string
-	initOnce    sync.Once
+	baseLogger *zap.SugaredLogger
+	initOnce   sync.Once
 )
 
 // integerLevelEncoder matches the existing encoding: (level + 3) * 10
@@ -54,10 +64,10 @@ func Init(cfg Config) {
 			panic("logging: Config.Service must not be empty")
 		}
 
-		serviceName = cfg.Service
+		isLocal := cfg.Environment == "local"
 
 		var zapCfg zap.Config
-		if cfg.Environment != "local" {
+		if !isLocal {
 			zapCfg = zap.NewProductionConfig()
 			zapCfg.OutputPaths = []string{"stdout"}
 			zapCfg.ErrorOutputPaths = []string{"stdout"}
@@ -70,6 +80,16 @@ func Init(cfg Config) {
 			zapCfg.EncoderConfig.TimeKey = "time"
 			zapCfg.DisableCaller = true
 			zapCfg.DisableStacktrace = true
+
+			// Apply sampling for cost reduction. Zap's sampler thins repeated
+			// log entries of the same (level, message) tuple in each 1-second
+			// window: it keeps the first `Initial` entries, then 1 in every
+			// `Thereafter`. Errors are always kept (see sampling.go).
+			samp := cfg.Sampling
+			if samp == (Sampling{}) {
+				samp = DefaultSampling()
+			}
+			zapCfg.Sampling = samp.toZap()
 		} else {
 			zapCfg = zap.NewDevelopmentConfig()
 			zapCfg.OutputPaths = []string{"stdout"}
@@ -77,6 +97,8 @@ func Init(cfg Config) {
 			zapCfg.InitialFields = map[string]interface{}{
 				fields.Service: cfg.Service,
 			}
+			// No sampling locally — devs need every log.
+			zapCfg.Sampling = nil
 		}
 
 		zapLogger, err := zapCfg.Build()
@@ -87,7 +109,7 @@ func Init(cfg Config) {
 		// Attach Sentry core for error-level logs (non-local only).
 		// The package initializes its own Sentry client from the DSN so it does not
 		// depend on the service having called sentry.Init() beforehand.
-		if cfg.Environment != "local" && cfg.SentryDSN != "" {
+		if !isLocal && cfg.SentryDSN != "" {
 			sentryClient, sentryErr := sentry.NewClient(sentry.ClientOptions{
 				Dsn:              cfg.SentryDSN,
 				ServerName:       cfg.Service,
@@ -132,7 +154,7 @@ func GetLogger(ctx context.Context) *Logger {
 	sugar := baseLogger
 
 	if ctx == nil {
-		return &Logger{SugaredLogger: sugar}
+		return &Logger{sugar: sugar}
 	}
 
 	// Auto-inject trace_id and span_id from Sentry span
@@ -158,7 +180,7 @@ func GetLogger(ctx context.Context) *Logger {
 	// Attach Sentry scope for error routing
 	sugar = sugar.With(getLogScopeFromContext(ctx))
 
-	return &Logger{SugaredLogger: sugar, ctx: ctx}
+	return &Logger{sugar: sugar, ctx: ctx}
 }
 
 // Get returns a logger without context (for startup/shutdown logging).
@@ -167,7 +189,28 @@ func Get() *Logger {
 	if baseLogger == nil {
 		panic("logging: Init() must be called before Get()")
 	}
-	return &Logger{SugaredLogger: baseLogger}
+	return &Logger{sugar: baseLogger}
+}
+
+// Debugw logs a debug-level message with structured key/value pairs.
+func (l *Logger) Debugw(msg string, keysAndValues ...interface{}) {
+	l.sugar.Debugw(msg, keysAndValues...)
+}
+
+// Infow logs an info-level message with structured key/value pairs.
+func (l *Logger) Infow(msg string, keysAndValues ...interface{}) {
+	l.sugar.Infow(msg, keysAndValues...)
+}
+
+// Warnw logs a warn-level message with structured key/value pairs.
+func (l *Logger) Warnw(msg string, keysAndValues ...interface{}) {
+	l.sugar.Warnw(msg, keysAndValues...)
+}
+
+// Errorw logs an error-level message with structured key/value pairs.
+// In non-local environments this is also forwarded to Sentry.
+func (l *Logger) Errorw(msg string, keysAndValues ...interface{}) {
+	l.sugar.Errorw(msg, keysAndValues...)
 }
 
 // Alertw logs at Error level AND sets the Sentry "alert" tag on the current span.
@@ -180,13 +223,10 @@ func (l *Logger) Alertw(msg string, keysAndValues ...interface{}) {
 			}
 		}
 	}
-	l.SugaredLogger.Errorw(msg, keysAndValues...)
+	l.sugar.Errorw(msg, keysAndValues...)
 }
 
-// resetForTesting resets the package-level state so tests can call Init() multiple times.
-// This is intentionally unexported — only test files in this package can use it.
-func resetForTesting() {
-	baseLogger = nil
-	serviceName = ""
-	initOnce = sync.Once{}
+// Sync flushes any buffered log entries. Call before process exit.
+func (l *Logger) Sync() error {
+	return l.sugar.Sync()
 }

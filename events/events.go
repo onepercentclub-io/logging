@@ -5,6 +5,10 @@ package events
 // ──────────────────────────────────────────────
 
 const (
+	// HTTPRequestStarted is logged by the REST middleware before handling a request.
+	// Fields: http.method, http.path
+	HTTPRequestStarted = "http_request_started"
+
 	// HTTPRequestCompleted is logged by the REST middleware after a request finishes.
 	// Fields: http.method, http.path, http.status_code, duration_ms
 	HTTPRequestCompleted = "http_request_completed"
@@ -34,6 +38,10 @@ const (
 // ──────────────────────────────────────────────
 
 const (
+	// DBQueryStarted is logged before a DB operation begins.
+	// Fields: db.collection (or db.table), db.operation
+	DBQueryStarted = "db_query_started"
+
 	// DBQueryCompleted is logged after a DB operation completes.
 	// Fields: db.collection, db.operation, db.query_ms
 	DBQueryCompleted = "db_query_completed"
@@ -59,6 +67,10 @@ const (
 	// TaskFailed is logged when an asynq task fails.
 	// Fields: task.id, task.name, task.type, duration_ms, error.type, error.message
 	TaskFailed = "task_failed"
+
+	// TaskRetrying is logged when an asynq task is being retried after a failure.
+	// Fields: task.id, task.name, task.type, retry.attempt, retry.max_count, retry.delay_ms
+	TaskRetrying = "task_retrying"
 )
 
 // ──────────────────────────────────────────────
@@ -80,10 +92,33 @@ const (
 )
 
 // ──────────────────────────────────────────────
-// Application Lifecycle
+// Auth Events
 // ──────────────────────────────────────────────
 
 const (
-	AppStarted  = "app_started"
-	AppShutdown = "app_shutdown"
+	AuthLoginSuccess = "auth_login_success"
+	AuthLoginFailed  = "auth_login_failed"
+	AuthTokenRefresh = "auth_token_refresh"
+	AuthTokenExpired = "auth_token_expired"
+)
+
+// ──────────────────────────────────────────────
+// Cache Events
+// ──────────────────────────────────────────────
+
+const (
+	CacheHit  = "cache_hit"
+	CacheMiss = "cache_miss"
+	CacheSet  = "cache_set"
+)
+
+// ──────────────────────────────────────────────
+// Application / System Lifecycle
+// ──────────────────────────────────────────────
+
+const (
+	AppStarted   = "app_started"
+	AppShutdown  = "app_shutdown"
+	HealthCheck  = "health_check"
+	ConfigLoaded = "config_loaded"
 )
