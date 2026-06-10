@@ -58,7 +58,9 @@ var (
 // (CloudWatch dashboards filter on it). Zap's internal level constants are
 // Debug=-1, Info=0, Warn=1, Error=2, DPanic=3, Panic=4, Fatal=5, so the
 // formula (l+3)*10 produces:
-//   Debug=20, Info=30, Warn=40, Error=50, DPanic=60, Panic=70, Fatal=80
+//
+//	Debug=20, Info=30, Warn=40, Error=50, DPanic=60, Panic=70, Fatal=80
+//
 // CloudWatch query for errors: `filter level = 50`.
 func integerLevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendInt8((int8(l) + 3) * 10)
