@@ -172,6 +172,13 @@ func GetLogger(ctx context.Context) *Logger {
 		sugar = sugar.With(fields.RequestID, reqID)
 	}
 
+	// Auto-inject custom fields set via WithField/WithFields
+	if customFields, ok := ctx.Value(ctxKeyCustomFields).(map[string]string); ok {
+		for k, v := range customFields {
+			sugar = sugar.With(k, v)
+		}
+	}
+
 	return &Logger{sugar: sugar, ctx: ctx}
 }
 
