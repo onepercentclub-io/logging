@@ -139,7 +139,7 @@ entries are kept, then 1 in every `Thereafter` after that.
 
 - Default in non-local: `Sampling{Initial: 100, Thereafter: 100}`.
 - `local` always disables sampling so developers see every log.
-- Set `Sampling{Initial: 0}` to disable sampling explicitly in prod.
+- Set `DisableSampling: true` to disable sampling explicitly in prod.
 
 ### Getting a Logger
 

@@ -6,10 +6,9 @@ import "go.uber.org/zap"
 //
 // Zap groups log entries by (level, message). For each group, within every
 // 1-second window, the first `Initial` entries are kept and after that 1 in
-// every `Thereafter` entries is kept. Error-level entries are exempt — see
-// DefaultSampling.
+// every `Thereafter` entries is kept.
 //
-// Set Initial=0 to disable sampling entirely.
+// To turn sampling off entirely, use Config.DisableSampling.
 type Sampling struct {
 	// Initial is the number of entries per (level, message) per second to
 	// keep unconditionally before sampling kicks in.
