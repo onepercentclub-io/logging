@@ -9,7 +9,7 @@ import "go.uber.org/zap"
 // every `Thereafter` entries is kept. Error-level entries are exempt — see
 // DefaultSampling.
 //
-// Set Initial=0 to disable sampling entirely.
+// To turn sampling off entirely, use Config.DisableSampling.
 type Sampling struct {
 	// Initial is the number of entries per (level, message) per second to
 	// keep unconditionally before sampling kicks in.

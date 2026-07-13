@@ -41,6 +41,10 @@ type Config struct {
 	// environments and no sampling is applied in local (devs see every log).
 	Sampling Sampling
 
+	// DisableSampling turns sampling off entirely, keeping every log entry.
+	// Takes precedence over Sampling. Leave false to use Sampling/DefaultSampling.
+	DisableSampling bool
+
 	// ExtraCores are additional zapcore.Core sinks teed to every log entry.
 	// Use this to inject error-reporting cores (e.g. zapsentry), shipping
 	// cores, or audit sinks — without coupling this package to a specific
@@ -92,11 +96,15 @@ func Init(cfg Config) {
 			zapCfg.DisableCaller = true
 			zapCfg.DisableStacktrace = true
 
-			samp := cfg.Sampling
-			if samp == (Sampling{}) {
-				samp = DefaultSampling()
+			if cfg.DisableSampling {
+				zapCfg.Sampling = nil
+			} else {
+				samp := cfg.Sampling
+				if samp == (Sampling{}) {
+					samp = DefaultSampling()
+				}
+				zapCfg.Sampling = samp.toZap()
 			}
-			zapCfg.Sampling = samp.toZap()
 		} else {
 			zapCfg = zap.NewDevelopmentConfig()
 			zapCfg.OutputPaths = []string{"stdout"}
