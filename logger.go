@@ -31,9 +31,10 @@ type Config struct {
 	// Service is the service name added to every log line.
 	Service string
 
-	// Environment is the deployment environment.
-	// "local" switches to a dev-friendly console encoder; everything else uses
-	// production JSON encoding to stdout.
+	// Environment is the deployment environment, added to every log line as
+	// the "environment" field. The output format is identical (structured
+	// JSON) in every environment; "local" only lowers the minimum level to
+	// debug and disables sampling.
 	Environment string
 
 	// Sampling controls log sampling to reduce CloudWatch volume.
@@ -81,38 +82,35 @@ func Init(cfg Config) {
 
 		isLocal := cfg.Environment == "local"
 
-		var zapCfg zap.Config
-		if !isLocal {
-			zapCfg = zap.NewProductionConfig()
-			zapCfg.OutputPaths = []string{"stdout"}
-			zapCfg.ErrorOutputPaths = []string{"stdout"}
-			zapCfg.InitialFields = map[string]interface{}{
-				fields.Service:     cfg.Service,
-				fields.Environment: cfg.Environment,
-			}
-			zapCfg.EncoderConfig.EncodeLevel = integerLevelEncoder
-			zapCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-			zapCfg.EncoderConfig.TimeKey = "time"
-			zapCfg.DisableCaller = true
-			zapCfg.DisableStacktrace = true
+		// Every environment — including local — uses the same JSON encoder
+		// and encoder config, so downstream consumers (CloudWatch metric
+		// filters, Logs Insights queries on the "msg"/"level"/"time" keys)
+		// see an identical log shape no matter where the service runs.
+		// Local differs only in minimum level (debug) and sampling (off).
+		zapCfg := zap.NewProductionConfig()
+		zapCfg.OutputPaths = []string{"stdout"}
+		zapCfg.ErrorOutputPaths = []string{"stdout"}
+		zapCfg.InitialFields = map[string]interface{}{
+			fields.Service:     cfg.Service,
+			fields.Environment: cfg.Environment,
+		}
+		zapCfg.EncoderConfig.EncodeLevel = integerLevelEncoder
+		zapCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		zapCfg.EncoderConfig.TimeKey = "time"
+		zapCfg.DisableCaller = true
+		zapCfg.DisableStacktrace = true
 
-			if cfg.DisableSampling {
-				zapCfg.Sampling = nil
-			} else {
-				samp := cfg.Sampling
-				if samp == (Sampling{}) {
-					samp = DefaultSampling()
-				}
-				zapCfg.Sampling = samp.toZap()
-			}
-		} else {
-			zapCfg = zap.NewDevelopmentConfig()
-			zapCfg.OutputPaths = []string{"stdout"}
-			zapCfg.ErrorOutputPaths = []string{"stderr"}
-			zapCfg.InitialFields = map[string]interface{}{
-				fields.Service: cfg.Service,
-			}
+		if isLocal {
+			zapCfg.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
 			zapCfg.Sampling = nil
+		} else if cfg.DisableSampling {
+			zapCfg.Sampling = nil
+		} else {
+			samp := cfg.Sampling
+			if samp == (Sampling{}) {
+				samp = DefaultSampling()
+			}
+			zapCfg.Sampling = samp.toZap()
 		}
 
 		zapLogger, err := zapCfg.Build()
