@@ -196,11 +196,26 @@ ctx = logging.WithRequestID(ctx, uuid.New().String())
 // that your tracing middleware already starts on `ctx` — nothing extra to do.
 ```
 
+Arbitrary custom fields can be attached the same way — they accumulate across
+calls and are auto-injected into every downstream log line:
+
+```go
+// One at a time
+ctx = logging.WithField(ctx, "flow_type", "sip_purchase")
+
+// Or several at once
+ctx = logging.WithFields(ctx, map[string]string{
+    "task.id":   task.ID,
+    "task.type": task.Type,
+})
+```
+
 Extract values back when needed:
 
 ```go
 userID, ok := logging.UserIDFromContext(ctx)
 reqID, ok := logging.RequestIDFromContext(ctx)
+custom, ok := logging.CustomFieldsFromContext(ctx)
 ```
 
 ## Helper Functions
