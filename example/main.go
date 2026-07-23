@@ -4,8 +4,8 @@
 // lookup, retries on failure, and finally enqueues an async task.
 //
 // Run with:
-//   go run ./example/        # local mode, dev-friendly console output
-//   ENV=prod go run ./example/  # production JSON output (one log per line)
+//   go run ./example/           # local mode (debug level, no sampling)
+//   ENV=prod go run ./example/  # production mode (info level, sampling on)
 package main
 
 import (

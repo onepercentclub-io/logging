@@ -49,7 +49,8 @@ func main() {
 }
 ```
 
-**Production output** (JSON, one line per log):
+**Output** (JSON, one line per log — identical shape in every environment,
+including local):
 ```json
 {"level":30,"time":"2026-03-12T12:30:50.000Z","msg":"http_request_completed","service":"investments-backend","environment":"prod","trace_id":"0af7651916cd43dd8448eb211c80319c","span_id":"b7ad6b7169203331","user_id":"usr_789","request_id":"req_abc-123","http.method":"POST","http.path":"/api/v1/payments","http.status_code":200,"duration_ms":234}
 ```
@@ -77,7 +78,7 @@ github.com/onepercentclub-io/logging
 // Subsequent calls are no-ops.
 logging.Init(logging.Config{
     Service:     "my-service",      // required
-    Environment: "prod",            // "local" uses dev-friendly console output
+    Environment: "prod",            // "local" enables debug level + disables sampling; output is always JSON
     Sampling:    logging.Sampling{Initial: 100, Thereafter: 100}, // optional; defaults applied in non-local
     ExtraCores:  []zapcore.Core{sentryCore}, // optional; see "Wiring an error sink"
 })
@@ -360,12 +361,21 @@ log.Infow(investlog.PaymentCreated,
 
 ## Local Development
 
+Output is structured JSON in every environment — local included — so the log
+shape you see on your machine is exactly what CloudWatch ingests, and metric
+filters keyed on `msg`/`level`/`time` can never diverge from what a service
+emits. Locally the minimum level is debug and sampling is off; that's the only
+difference from production. For a human-friendly view, pipe through `jq`:
+
 ```bash
-# Run example
+# Run example (local: debug level, no sampling — still JSON)
 go run ./example/
 
-# Production JSON output (one line per log, what CloudWatch ingests)
+# Production behavior (info level, sampling on)
 ENV=prod go run ./example/
+
+# Pretty-print locally
+go run ./example/ | jq .
 ```
 
 ## Migrating from the Sentry-coupled version
